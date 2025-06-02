@@ -15,6 +15,8 @@ def decode_bencode(bencoded_value)
     raise ArgumentError, 'Invalid encoded value' if first_colon.nil?
 
     bencoded_value[first_colon + 1..]
+  elsif bencoded_value[0] == 'i' && bencoded_value[-1] == 'e'
+    bencoded_value[1..-2].to_i
   else
     puts 'Only strings are supported at the moment'
     exit(1)
