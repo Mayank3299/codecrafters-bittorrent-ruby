@@ -8,18 +8,43 @@ if ARGV.length < 2
   exit(1)
 end
 
-def decode_bencode(bencoded_value)
-  # debugger
-  if bencoded_value[0].chr.match?(/\d/)
-    first_colon = bencoded_value.index(':')
-    raise ArgumentError, 'Invalid encoded value' if first_colon.nil?
+def decode_str(bencoded_value)
+  raise ArgumentError, 'Invalid encoded value' unless bencoded_value.include?(':')
 
-    bencoded_value[first_colon + 1..]
-  elsif bencoded_value[0] == 'i' && bencoded_value[-1] == 'e'
-    bencoded_value[1..-2].to_i
-  else
-    puts 'Only strings are supported at the moment'
-    exit(1)
+  str_size, rest = bencoded_value.split(':', 2)
+  string = rest[...str_size.to_i]
+  [string, rest[str_size.to_i..]]
+end
+
+def decode_int(bencoded_value)
+  raise ArgumentError, 'Invalid encoded value' unless bencoded_value.include?('e')
+
+  bencoded_value = bencoded_value[1..]
+  number, rest = bencoded_value.split('e', 2)
+  [number.to_i, rest]
+end
+
+def decode_list(bencoded_value)
+  raise ArgumentError, 'Invalid encoded value' unless bencoded_value.include?('e')
+
+  bencoded_value = bencoded_value[1..]
+  list = []
+  rest = bencoded_value
+  until rest[0] == 'e'
+    item, rest = decode_bencode(rest)
+    list << item
+  end
+  [list, rest[1..]]
+end
+
+def decode_bencode(bencoded_value)
+  case bencoded_value[0]
+  when /\d/
+    decode_str(bencoded_value)
+  when /i/
+    decode_int(bencoded_value)
+  when /l/
+    decode_list(bencoded_value)
   end
 end
 
@@ -31,6 +56,6 @@ if command == 'decode'
 
   # Uncomment this block to pass the first stage
   encoded_str = ARGV[1]
-  decoded_str = decode_bencode(encoded_str)
+  decoded_str, = decode_bencode(encoded_str)
   puts JSON.generate(decoded_str)
 end
