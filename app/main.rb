@@ -37,6 +37,21 @@ def decode_list(bencoded_value)
   [list, rest[1..]]
 end
 
+def decode_dict(bencoded_value)
+  raise ArgumentError, 'Invalid encoded value' unless bencoded_value.include?('e')
+
+  bencoded_value = bencoded_value[1..]
+  hash = {}
+  rest = bencoded_value
+  until rest[0] == 'e'
+    key, rest = decode_bencode(rest)
+    value, rest = decode_bencode(rest)
+
+    hash[key] = value
+  end
+  [hash, rest[1..]]
+end
+
 def decode_bencode(bencoded_value)
   case bencoded_value[0]
   when /\d/
@@ -45,6 +60,8 @@ def decode_bencode(bencoded_value)
     decode_int(bencoded_value)
   when /l/
     decode_list(bencoded_value)
+  when /d/
+    decode_dict(bencoded_value)
   end
 end
 
