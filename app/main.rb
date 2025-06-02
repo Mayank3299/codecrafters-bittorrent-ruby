@@ -75,4 +75,11 @@ if command == 'decode'
   encoded_str = ARGV[1]
   decoded_str, = decode_bencode(encoded_str)
   puts JSON.generate(decoded_str)
+elsif command == 'info'
+  torrent_path = ARGV[1]
+  encoded_str = File.binread(torrent_path)
+  decoded_str, = decode_bencode(encoded_str)
+
+  puts "Tracker URL: #{decoded_str['announce']}"
+  puts "Length: #{decoded_str['info']['length']}"
 end
