@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'json'
+require 'digest'
 # require 'byebug'
 
 if ARGV.length < 2
@@ -65,6 +66,43 @@ def decode_bencode(bencoded_value)
   end
 end
 
+def encode_str(data)
+  "#{data.length}:#{data}"
+end
+
+def encode_int(data)
+  "i#{data}e"
+end
+
+def encode_list(data)
+  encoded_str = 'l'
+  data.each { |ele| encoded_str << encode_bencode(ele) }
+  encoded_str += 'e'
+  encoded_str
+end
+
+def encode_dict(data)
+  encoded_str = 'd'
+  data.sort.each { |key, val| encoded_str += "#{encode_bencode(key)}#{encode_bencode(val)}" }
+  encoded_str += 'e'
+  encoded_str
+end
+
+def encode_bencode(data)
+  case data
+  when String, Symbol
+    encode_str(data)
+  when Integer
+    encode_int(data)
+  when Array
+    encode_list(data)
+  when Hash
+    encode_dict(data)
+  else
+    raise ArgumentError, "Cannot bencode data type: #{data.class}"
+  end
+end
+
 command = ARGV[0]
 
 if command == 'decode'
@@ -79,7 +117,11 @@ elsif command == 'info'
   torrent_path = ARGV[1]
   encoded_str = File.binread(torrent_path)
   decoded_str, = decode_bencode(encoded_str)
+  torrent_info = decoded_str['info']
+  encode_info = encode_bencode(torrent_info)
+  info_hash = Digest::SHA1.hexdigest(encode_info)
 
   puts "Tracker URL: #{decoded_str['announce']}"
   puts "Length: #{decoded_str['info']['length']}"
+  puts "Info Hash: #{info_hash}"
 end
