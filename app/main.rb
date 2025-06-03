@@ -124,4 +124,6 @@ elsif command == 'info'
   puts "Tracker URL: #{decoded_str['announce']}"
   puts "Length: #{decoded_str['info']['length']}"
   puts "Info Hash: #{info_hash}"
+  puts "Piece Length: #{decoded_str['info']['piece length']}"
+  puts "Piece Hashes: #{decoded_str['info']['pieces'].unpack1('H*').scan(/.{40}/)}"
 end
