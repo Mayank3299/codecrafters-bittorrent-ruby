@@ -5,6 +5,7 @@ require 'digest'
 require 'uri'
 require 'net/http'
 require 'securerandom'
+require 'socket'
 # require 'byebug'
 
 if ARGV.length < 2
@@ -106,6 +107,28 @@ def encode_bencode(data)
   end
 end
 
+def discover_peers(peers)
+  peers.unpack('C*').each_slice(6).map do |slice|
+    ip = slice[0..3].join('.')
+    port = (slice[4] << 8) + slice[5]
+    "#{ip}:#{port}"
+  end
+end
+
+def peer_handshake(peer_ip, peer_port, info_hash)
+  socket = TCPSocket.new(peer_ip, peer_port)
+
+  bt_protocol = 'BitTorrent protocol'
+  reserved_bytes = "\x00" * 8
+  peer_id = SecureRandom.hex(10)
+  handshake = bt_protocol.length.chr + bt_protocol + reserved_bytes + info_hash + peer_id
+
+  socket.write(handshake)
+
+  response = socket.read(68)
+  response[48..].unpack1('H*')
+end
+
 command = ARGV[0]
 
 case command
@@ -136,12 +159,15 @@ when 'peers'
   torrent_path = ARGV[1]
   encoded_str = File.binread(torrent_path)
   decoded_str, = decode_bencode(encoded_str)
+
   # Getting tracker url in URI
   tracker_url = decoded_str['announce']
   url = URI.parse(tracker_url)
-  # Encode info hash with url encoding 
+
+  # Encode info hash with url encoding
   encoded_info = encode_bencode(decoded_str['info'])
   info_hash = Digest::SHA1.digest(encoded_info)
+
   # Params for tracker get request
   peer_id = SecureRandom.hex(10)
   params = {
@@ -153,18 +179,31 @@ when 'peers'
     'left' => decoded_str['info']['length'],
     'compact' => 1
   }
+
   # Adding query params
   url.query = URI.encode_www_form(params)
+
   # Getting response and decoding it
   response = Net::HTTP.get_response(url)
   decoded_response = decode_bencode(response.body).first
+
   # Get peers in bytes, each is 6 bytes-> 4-IP,2-PORT, unpack them and getting the peers
   peers = decoded_response['peers']
-  peers_data = peers.unpack('C*').each_slice(6).map do |slice|
-    ip = slice[0..3].join('.')
-    port = (slice[4] << 8) + slice[5]
-    "#{ip}:#{port}"
-  end
+  peers_data = discover_peers(peers)
 
   puts peers_data
+when 'handshake'
+  torrent_path = ARGV[1]
+  peer_ip, peer_port = ARGV[2].split(':', 2)
+
+  # Parsing torrent file
+  encoded_str = File.binread(torrent_path)
+  decoded_str, = decode_bencode(encoded_str)
+
+  # Encode info hash with url encoding
+  encoded_info = encode_bencode(decoded_str['info'])
+  info_hash = Digest::SHA1.digest(encoded_info)
+
+  hex_peer_id = peer_handshake(peer_ip, peer_port, info_hash)
+  puts "Peer ID: #{hex_peer_id}"
 end
