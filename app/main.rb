@@ -2,6 +2,9 @@
 
 require 'json'
 require 'digest'
+require 'uri'
+require 'net/http'
+require 'securerandom'
 # require 'byebug'
 
 if ARGV.length < 2
@@ -76,7 +79,7 @@ end
 
 def encode_list(data)
   encoded_str = 'l'
-  data.each { |ele| encoded_str << encode_bencode(ele) }
+  data.each { |ele| encoded_str += encode_bencode(ele) }
   encoded_str += 'e'
   encoded_str
 end
@@ -105,7 +108,8 @@ end
 
 command = ARGV[0]
 
-if command == 'decode'
+case command
+when 'decode'
   # You can use print statements as follows for debugging, they'll be visible when running tests.
   # $stderr.puts 'Logs from your program will appear here'
 
@@ -113,17 +117,54 @@ if command == 'decode'
   encoded_str = ARGV[1]
   decoded_str, = decode_bencode(encoded_str)
   puts JSON.generate(decoded_str)
-elsif command == 'info'
+when 'info'
   torrent_path = ARGV[1]
   encoded_str = File.binread(torrent_path)
   decoded_str, = decode_bencode(encoded_str)
   torrent_info = decoded_str['info']
-  encode_info = encode_bencode(torrent_info)
-  info_hash = Digest::SHA1.hexdigest(encode_info)
+  encoded_info = encode_bencode(torrent_info)
+  info_hash = Digest::SHA1.hexdigest(encoded_info)
 
   puts "Tracker URL: #{decoded_str['announce']}"
   puts "Length: #{decoded_str['info']['length']}"
   puts "Info Hash: #{info_hash}"
   puts "Piece Length: #{decoded_str['info']['piece length']}"
+  # String of SHA1 hashes, each of 40 bytes in hexadecimal
   puts "Piece Hashes: #{decoded_str['info']['pieces'].unpack1('H*').scan(/.{40}/)}"
+when 'peers'
+  # Parsing torrent file
+  torrent_path = ARGV[1]
+  encoded_str = File.binread(torrent_path)
+  decoded_str, = decode_bencode(encoded_str)
+  # Getting tracker url in URI
+  tracker_url = decoded_str['announce']
+  url = URI.parse(tracker_url)
+  # Encode info hash with url encoding 
+  encoded_info = encode_bencode(decoded_str['info'])
+  info_hash = Digest::SHA1.digest(encoded_info)
+  # Params for tracker get request
+  peer_id = SecureRandom.hex(10)
+  params = {
+    'info_hash' => info_hash,
+    'peer_id' => peer_id,
+    'port' => 6881,
+    'uploaded' => 0,
+    'downloaded' => 0,
+    'left' => decoded_str['info']['length'],
+    'compact' => 1
+  }
+  # Adding query params
+  url.query = URI.encode_www_form(params)
+  # Getting response and decoding it
+  response = Net::HTTP.get_response(url)
+  decoded_response = decode_bencode(response.body).first
+  # Get peers in bytes, each is 6 bytes-> 4-IP,2-PORT, unpack them and getting the peers
+  peers = decoded_response['peers']
+  peers_data = peers.unpack('C*').each_slice(6).map do |slice|
+    ip = slice[0..3].join('.')
+    port = (slice[4] << 8) + slice[5]
+    "#{ip}:#{port}"
+  end
+
+  puts peers_data
 end
