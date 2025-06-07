@@ -6,6 +6,9 @@ require 'uri'
 require 'net/http'
 require 'securerandom'
 require 'socket'
+require 'set'
+require 'timeout'
+# require 'thread'
 # require 'byebug'
 
 BITTORRENT_MESSAGE_ID_HASH = {
@@ -21,6 +24,7 @@ BITTORRENT_MESSAGE_ID_HASH = {
 }.freeze
 
 BLOCK_SIZE = 16 * 1024 # 16 KB = 16,384
+WORKER_COUNT = 10
 
 if ARGV.length < 2
   puts 'Usage: your_program.sh <command> <args>'
@@ -188,26 +192,28 @@ end
 
 # rubocop:disable Metrics/MethodLength
 def peer_handshake(peer_ip, peer_port, info_hash)
-  socket = TCPSocket.new(peer_ip, peer_port)
   peer_id = SecureRandom.hex(10)
-  handshake = build_handshake(info_hash, peer_id)
-  socket.write(handshake)
+  socket = nil
 
-  response = socket.read(68)
-  if valid_handshake?(response, info_hash)
-    [response[48..].unpack1('H*'), socket, true]
-  else
-    socket.close
+  begin
+    Timeout.timeout(5) do
+      socket = TCPSocket.new(peer_ip, peer_port)
+      socket.write(build_handshake(info_hash, peer_id))
+      response = socket.read(68)
+      return [response[48..].unpack1('H*'), socket, true] if valid_handshake?(response, info_hash)
+    end
+  rescue StandardError => e
+    warn "Handshake failed for #{peer_ip}:#{peer_port} - #{e.class}: #{e.message}"
+    socket&.close unless socket&.closed?
     [nil, nil, false]
   end
 end
 # rubocop:enable Metrics/MethodLength
 
 def read_until(socket, message_id)
-  loop do
-    message = read_peer_message(socket)
-    return if message[:id] == message_id
-  end
+  message = nil
+  message = read_peer_message(socket) until message && message[:id] == message_id
+  message
 end
 
 def read_peer_message(socket)
@@ -237,6 +243,7 @@ def piece_download(socket, info_hash, piece_index)
     length = [BLOCK_SIZE, current_piece_length - offset].min # last block might be smaller
     payload = [piece_index, offset, length].pack('N3')
     # Send request message
+    # check_if_peer_unchoked(socket)
     send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['request'], payload: payload)
   end
 
@@ -244,6 +251,7 @@ def piece_download(socket, info_hash, piece_index)
   received_bytes = 0
 
   until received_bytes >= current_piece_length
+    # check_if_peer_unchoked(socket)
     message = read_peer_message(socket)
     next if message[:id] != BITTORRENT_MESSAGE_ID_HASH['piece']
 
@@ -263,15 +271,14 @@ def validate_piece_data(info_hash, piece_index, piece_data)
   expected_hash = info_hash['pieces'].byteslice(piece_index * 20, 20)
   output_hash = Digest::SHA1.digest(piece_data)
   raise 'Piece hash mismatch' if output_hash != expected_hash # raise error if the hashes don't match
+
+  true
 end
 
 def handle_peer_messages(socket, info_hash, output_path, piece_index)
   # Waiting to receive bitfield message
   read_until(socket, BITTORRENT_MESSAGE_ID_HASH['bitfield'])
-  # Send interested message
-  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['interested'])
-  # Waiting to receive unchoke message
-  read_until(socket, BITTORRENT_MESSAGE_ID_HASH['unchoke'])
+  make_peer_unchoked(socket)
   # Download piece in blocks
   piece_data = piece_download(socket, info_hash, piece_index)
   # Validate received piece hash with torrent info_hash's piece hash
@@ -284,6 +291,129 @@ rescue StandardError => e
   puts "Error: #{e.message}"
 end
 # rubocop:enable Metrics/MethodLength, Metrics/AbcSize
+
+def bitfield_to_indices(payload)
+  bits = payload.unpack1('B*')
+  bits.chars.each_with_index.select { |bit, _| bit == '1' }.map(&:last)
+end
+
+def make_peer_unchoked(socket)
+  # Send interested message
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['interested'])
+  # Waiting to receive unchoke message
+  read_until(socket, BITTORRENT_MESSAGE_ID_HASH['unchoke'])
+end
+
+def check_if_peer_unchoked(socket)
+  message = read_peer_message(socket)
+  raise 'Choked by peer' if message[:id] == BITTORRENT_MESSAGE_ID_HASH['choke']
+end
+
+def calculate_total_pieces(decoded_info)
+  piece_length = decoded_info['piece length']
+  total_length = decoded_info['length']
+  (total_length.to_f / piece_length).ceil
+end
+
+def initialize_peers_queue(peers_data)
+  queue = Thread::Queue.new
+  peers_data.each { |peer| queue << peer }
+  queue
+end
+
+def prepare_output_file(path, size)
+  File.open(path, 'wb') { |f| f.truncate(size) }
+end
+
+def write_piece(output_path, piece_index, piece_length, piece_data)
+  File.open(output_path, 'r+b') do |f|
+    f.seek(piece_index * piece_length)
+    f.write(piece_data)
+  end
+end
+
+def log_progress(downloaded_pieces, total_pieces, piece_index, thread_id, peer_ip)
+  percent = ((downloaded_pieces.size.to_f / total_pieces) * 100).round(2)
+  timestamp = Time.now.strftime('%Y/%m/%d %H:%M:%S')
+  thread_info = thread_id ? " [Thread-#{thread_id}]" : ""
+  puts "#{timestamp} (#{percent}%) Downloaded piece ##{piece_index}#{thread_info} #{peer_ip}"
+  $stdout.flush
+end
+
+def download_from_peer(peer, decoded_info, total_pieces, info_hash, downloaded_pieces, claimed_pieces, mutex, peers_queue, output_path)
+  peer_ip, peer_port = peer.split(':')
+
+  _, socket, handshake_ok = peer_handshake(peer_ip, peer_port, info_hash)
+  return unless handshake_ok
+
+  bitfield_message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['bitfield'])
+  make_peer_unchoked(socket)
+  return unless bitfield_message[:payload]
+
+  piece_indices = bitfield_to_indices(bitfield_message[:payload]).shuffle
+
+  begin
+    loop do
+      piece_index = nil
+      mutex.synchronize do
+        available = piece_indices - downloaded_pieces.to_a - claimed_pieces.to_a
+        piece_index = available.first
+        claimed_pieces << piece_index if piece_index
+      end
+
+      break unless piece_index
+
+      begin
+        piece_data = piece_download(socket, decoded_info, piece_index)
+
+        if validate_piece_data(decoded_info, piece_index, piece_data)
+          mutex.synchronize do
+            write_piece(output_path, piece_index, decoded_info['piece length'], piece_data)
+            downloaded_pieces << piece_index
+            claimed_pieces.delete(piece_index)
+            log_progress(downloaded_pieces, total_pieces, piece_index, Thread.current.object_id, peer_ip)
+          end
+        else
+          # Validation failed: release claim for retry
+          mutex.synchronize { claimed_pieces.delete(piece_index) }
+          puts "Validation failed for piece ##{piece_index} from #{peer}"
+        end
+      rescue StandardError => e
+        puts "Error downloading piece ##{piece_index} from #{peer}: #{e.message}"
+        mutex.synchronize { claimed_pieces.delete(piece_index) }
+        peers_queue << peer
+        sleep 0.1
+        break
+      end
+    end
+  ensure
+    socket.close if socket && !socket.closed?
+  end
+end
+
+def start_download(peers_queue, decoded_info, total_pieces, info_hash, output_path)
+  downloaded_pieces = Set.new
+  claimed_pieces = Set.new
+  mutex = Mutex.new
+
+  workers = Array.new(WORKER_COUNT) do
+    Thread.new do
+      until peers_queue.empty?
+        peer = begin
+          peers_queue.pop(true)
+        rescue ThreadError
+          nil
+        end
+        next unless peer
+
+        download_from_peer(peer, decoded_info, total_pieces, info_hash, downloaded_pieces, claimed_pieces, mutex, peers_queue, output_path)
+      end
+    end
+  end
+
+  workers.each(&:join)
+  puts "\nDownload complete! #{downloaded_pieces.size}/#{total_pieces} pieces written."
+end
 
 command = ARGV[0]
 
@@ -325,7 +455,7 @@ when 'handshake'
   puts "Peer ID: #{hex_peer_id}"
 when 'download_piece'
   if ARGV.length < 5
-    puts 'Usage: your_program.sh <command> -o <output_file> <torrent_file> <piece_index>'
+    puts 'Usage: your_program.sh download_piece -o <output_file> <torrent_file> <piece_index>'
     exit(1)
   end
 
@@ -344,4 +474,27 @@ when 'download_piece'
 
   _, socket, peer_handshake_valid = peer_handshake(peer_ip, peer_port, info_hash)
   handle_peer_messages(socket, decoded_str['info'], output_path, piece_index) if peer_handshake_valid
+when 'download'
+  if ARGV.length < 4
+    puts 'Usage: your_program.sh download -o <output_file> <torrent_file>'
+    exit(1)
+  end
+
+  output_path = ARGV[2]
+  torrent_path = ARGV[3]
+
+  decoded_str = parse_torrent_file(torrent_path)
+  info_hash = encode_and_digest_info_hash(decoded_str)
+
+  # Get all the peers ip:port
+  peers = peer_string(decoded_str)
+  peers_data = discover_peers(peers)
+
+  decoded_info = decoded_str['info']
+  total_pieces = calculate_total_pieces(decoded_info)
+
+  peers_queue = initialize_peers_queue(peers_data)
+  prepare_output_file(output_path, decoded_info['length'])
+
+  start_download(peers_queue, decoded_info, total_pieces, info_hash, output_path)
 end
