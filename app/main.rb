@@ -9,7 +9,7 @@ require 'socket'
 require 'set'
 require 'timeout'
 # require 'thread'
-# require 'byebug'
+require 'byebug'
 
 BITTORRENT_MESSAGE_ID_HASH = {
   'choke' => 0,
@@ -140,6 +140,26 @@ def encode_and_digest_info_hash(decoded_str, hex_digest: false)
   hex_digest ? Digest::SHA1.hexdigest(encoded_info) : Digest::SHA1.digest(encoded_info)
 end
 
+# def udp_tracker(host, port)
+#   udp_socket = UDPSocket.new
+#   udp_socket.connect(host, port)
+
+#   protocol_id = 0x41727101980
+#   action = 0
+#   transaction_id = rand(0..0xFFFFFFFF)
+
+#   request = [protocol_id << 32, protocol_id & 0xFFFFFFFF, action, transaction_id].pack('N4')
+#   udp_socket.send(request, 0)
+
+#   response = nil
+#   Timeout.timeout(5) do
+#     response = udp_socket.recv(16)
+#   end
+
+#   action_response, transaction_id_response, connection_id_high, connection_id_low = response.unpack('N4')
+#   raise 'Invalid connect response from tracker' if action_response != 0 && transaction_id_response != transaction_id
+# end
+
 # rubocop:disable Metrics/MethodLength
 def peer_string(decoded_str)
   # Getting tracker url in URI
@@ -200,7 +220,7 @@ def peer_handshake(peer_ip, peer_port, info_hash)
       socket = TCPSocket.new(peer_ip, peer_port)
       socket.write(build_handshake(info_hash, peer_id))
       response = socket.read(68)
-      return [response[48..].unpack1('H*'), socket, true] if valid_handshake?(response, info_hash)
+      return [response[48..].unpack1('H*'), socket, true] if response && valid_handshake?(response, info_hash)
     end
   rescue StandardError => e
     warn "Handshake failed for #{peer_ip}:#{peer_port} - #{e.class}: #{e.message}"
@@ -217,7 +237,7 @@ def read_until(socket, message_id)
 end
 
 def read_peer_message(socket)
-  message_length = socket.read(4).unpack1('N*')
+  message_length = socket.read(4)&.unpack1('N*')
   return { id: nil, payload: nil } if message_length.nil?
 
   message_id = socket.read(1).unpack1('C')
@@ -335,7 +355,7 @@ end
 def log_progress(downloaded_pieces, total_pieces, piece_index, thread_id, peer_ip)
   percent = ((downloaded_pieces.size.to_f / total_pieces) * 100).round(2)
   timestamp = Time.now.strftime('%Y/%m/%d %H:%M:%S')
-  thread_info = thread_id ? " [Thread-#{thread_id}]" : ""
+  thread_info = thread_id ? " [Thread-#{thread_id}]" : ''
   puts "#{timestamp} (#{percent}%) Downloaded piece ##{piece_index}#{thread_info} #{peer_ip}"
   $stdout.flush
 end
@@ -353,7 +373,7 @@ def download_from_peer(peer, decoded_info, total_pieces, info_hash, downloaded_p
   piece_indices = bitfield_to_indices(bitfield_message[:payload]).shuffle
 
   begin
-    loop do
+    while downloaded_pieces.size < total_pieces
       piece_index = nil
       mutex.synchronize do
         available = piece_indices - downloaded_pieces.to_a - claimed_pieces.to_a
