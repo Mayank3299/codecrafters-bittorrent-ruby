@@ -161,12 +161,12 @@ end
 # end
 
 # rubocop:disable Metrics/MethodLength
-def peer_string(decoded_str)
+def peer_string(decoded_str, tracker_url: nil, info_hash: nil)
   # Getting tracker url in URI
-  tracker_url = decoded_str['announce']
+  tracker_url ||= decoded_str['announce']
   url = URI.parse(tracker_url)
 
-  info_hash = encode_and_digest_info_hash(decoded_str)
+  info_hash ||= encode_and_digest_info_hash(decoded_str)
 
   # Params for tracker get request
   peer_id = SecureRandom.hex(10)
@@ -176,9 +176,10 @@ def peer_string(decoded_str)
     'port' => 6881,
     'uploaded' => 0,
     'downloaded' => 0,
-    'left' => decoded_str['info']['length'],
     'compact' => 1
   }
+  # Handling for magnet links since file size not known
+  params['left'] = (decoded_str ? decoded_str['info']['length'] : 999)
 
   # Adding query params
   url.query = URI.encode_www_form(params)
@@ -200,9 +201,9 @@ def discover_peers(peers)
   end
 end
 
-def build_handshake(info_hash, peer_id)
+def build_handshake(info_hash, peer_id, extension: false)
   bt_protocol = 'BitTorrent protocol'
-  reserved_bytes = "\x00" * 8
+  reserved_bytes = (extension ? "#{"\x00" * 5}\x10#{"\x00" * 2}" : "\x00" * 8)
   bt_protocol.length.chr + bt_protocol + reserved_bytes + info_hash + peer_id
 end
 
@@ -211,14 +212,14 @@ def valid_handshake?(response, info_hash)
 end
 
 # rubocop:disable Metrics/MethodLength
-def peer_handshake(peer_ip, peer_port, info_hash)
+def peer_handshake(peer_ip, peer_port, info_hash, extension: false)
   peer_id = SecureRandom.hex(10)
   socket = nil
 
   begin
     Timeout.timeout(5) do
       socket = TCPSocket.new(peer_ip, peer_port)
-      socket.write(build_handshake(info_hash, peer_id))
+      socket.write(build_handshake(info_hash, peer_id, extension: extension))
       response = socket.read(68)
       return [response[48..].unpack1('H*'), socket, true] if response && valid_handshake?(response, info_hash)
     end
@@ -524,4 +525,17 @@ when 'magnet_parse'
 
   puts "Tracker URL: #{magnet_hash['tr']}"
   puts "Info Hash: #{info_hash}"
+when 'magnet_handshake'
+  magnet_link = ARGV[1]
+  magnet_hash = Hash[URI.decode_www_form(magnet_link)]
+
+  tracker_url = magnet_hash['tr']
+  info_hash = [magnet_hash['magnet:?xt'].split('urn:btih:').last].pack('H*')
+
+  peers = peer_string(nil, tracker_url: tracker_url, info_hash: info_hash)
+  peers_data = discover_peers(peers)
+  peer_ip, peer_port = peers_data.first.split(':', 2)
+
+  hex_peer_id, = peer_handshake(peer_ip, peer_port, info_hash, extension: true)
+  puts "Peer ID: #{hex_peer_id}"
 end
