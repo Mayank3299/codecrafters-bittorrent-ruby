@@ -9,7 +9,7 @@ require 'socket'
 require 'set'
 require 'timeout'
 # require 'thread'
-require 'byebug'
+# require 'byebug'
 
 BITTORRENT_MESSAGE_ID_HASH = {
   'choke' => 0,
@@ -517,4 +517,11 @@ when 'download'
   prepare_output_file(output_path, decoded_info['length'])
 
   start_download(peers_queue, decoded_info, total_pieces, info_hash, output_path)
+when 'magnet_parse'
+  magnet_link = ARGV[1]
+  magnet_hash = Hash[URI.decode_www_form(magnet_link)]
+  info_hash = magnet_hash['magnet:?xt'].split('urn:btih:').last
+
+  puts "Tracker URL: #{magnet_hash['tr']}"
+  puts "Info Hash: #{info_hash}"
 end
