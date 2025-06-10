@@ -447,6 +447,11 @@ def build_extension_handshake_payload(socket, payload)
   [BITTORRENT_MESSAGE_ID_HASH['extension_handshake']].pack('C') + extension_handshake_message
 end
 
+def build_request_metadata_payload(peer_metadata_id)
+  metadata_message = encode_bencode({ 'msg_type' => 0, 'piece' => 0 })
+  [peer_metadata_id].pack('C') + metadata_message
+end
+
 command = ARGV[0]
 
 case command
@@ -554,4 +559,22 @@ when 'magnet_handshake'
 
   puts "Peer ID: #{handshake_payload[48..].unpack1('H*')}"
   puts "Peer Metadata Extension ID: #{decode_bencode(message[:payload][1..]).first['m']['ut_metadata']}"
+when 'magnet_info'
+  magnet_link = ARGV[1]
+  magnet_hash = Hash[URI.decode_www_form(magnet_link)]
+
+  tracker_url = magnet_hash['tr']
+  info_hash = [magnet_hash['magnet:?xt'].split('urn:btih:').last].pack('H*')
+  peers = peer_string(nil, tracker_url: tracker_url, info_hash: info_hash)
+  peers_data = discover_peers(peers)
+  peer_ip, peer_port = peers_data.first.split(':', 2)
+
+  handshake_payload, socket, = peer_handshake(peer_ip, peer_port, info_hash, extension: true)
+  extension_payload = build_extension_handshake_payload(socket, handshake_payload)
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_payload)
+  message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'])
+
+  peer_metadata_extension_id = decode_bencode(message[:payload][1..]).first['m']['ut_metadata']
+  extension_message = build_request_metadata_payload(peer_metadata_extension_id)
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_message)
 end
