@@ -577,4 +577,15 @@ when 'magnet_info'
   peer_metadata_extension_id = decode_bencode(message[:payload][1..]).first['m']['ut_metadata']
   extension_message = build_request_metadata_payload(peer_metadata_extension_id)
   send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_message)
+  metadata_message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'])
+  data = metadata_message[:payload]
+  idx = data.index('eed')
+  magnet_data = decode_bencode(data[idx + 2..]).first
+
+  puts "Tracker URL: #{magnet_hash['tr']}"
+  puts "Length: #{magnet_data['length']}"
+  puts "Info Hash: #{info_hash.unpack1('H*')}"
+  puts "Piece Length: #{magnet_data['piece length']}"
+  puts "Piece Length: #{magnet_data['piece length']}"
+  puts "Piece Hashes: #{magnet_data['pieces'].unpack1('H*').scan(/.{40}/)}"
 end
