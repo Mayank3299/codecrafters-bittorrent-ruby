@@ -21,8 +21,8 @@ BITTORRENT_MESSAGE_ID_HASH = {
   'request' => 6,
   'piece' => 7,
   'cancel' => 8,
-  'extension' => 0,
-
+  'extension_handshake' => 0,
+  'extension_message' => 20
 }.freeze
 
 BLOCK_SIZE = 16 * 1024 # 16 KB = 16,384
@@ -444,7 +444,7 @@ def build_extension_handshake_payload(socket, payload)
 
   read_until(socket, BITTORRENT_MESSAGE_ID_HASH['bitfield'])
   extension_handshake_message = encode_bencode({ 'm' => { 'ut_metadata' => 129 } })
-  [BITTORRENT_MESSAGE_ID_HASH['extension']].pack('C') + extension_handshake_message
+  [BITTORRENT_MESSAGE_ID_HASH['extension_handshake']].pack('C') + extension_handshake_message
 end
 
 command = ARGV[0]
@@ -549,6 +549,9 @@ when 'magnet_handshake'
 
   handshake_payload, socket, = peer_handshake(peer_ip, peer_port, info_hash, extension: true)
   extension_payload = build_extension_handshake_payload(socket, handshake_payload)
-  send_peer_message(socket, 20, payload: extension_payload)
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_payload)
+  message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'])
+
   puts "Peer ID: #{handshake_payload[48..].unpack1('H*')}"
+  puts "Peer Metadata Extension ID: #{decode_bencode(message[:payload][1..]).first['m']['ut_metadata']}"
 end
