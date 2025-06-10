@@ -20,7 +20,9 @@ BITTORRENT_MESSAGE_ID_HASH = {
   'bitfield' => 5,
   'request' => 6,
   'piece' => 7,
-  'cancel' => 8
+  'cancel' => 8,
+  'extension' => 0,
+
 }.freeze
 
 BLOCK_SIZE = 16 * 1024 # 16 KB = 16,384
@@ -218,10 +220,11 @@ def peer_handshake(peer_ip, peer_port, info_hash, extension: false)
 
   begin
     Timeout.timeout(5) do
+      # debugger
       socket = TCPSocket.new(peer_ip, peer_port)
       socket.write(build_handshake(info_hash, peer_id, extension: extension))
       response = socket.read(68)
-      return [response[48..].unpack1('H*'), socket, true] if response && valid_handshake?(response, info_hash)
+      return [response, socket, true] if response && valid_handshake?(response, info_hash)
     end
   rescue StandardError => e
     warn "Handshake failed for #{peer_ip}:#{peer_port} - #{e.class}: #{e.message}"
@@ -436,6 +439,14 @@ def start_download(peers_queue, decoded_info, total_pieces, info_hash, output_pa
   puts "\nDownload complete! #{downloaded_pieces.size}/#{total_pieces} pieces written."
 end
 
+def build_extension_handshake_payload(socket, payload)
+  return unless payload[20..27].unpack1('H*').to_i(16).positive?
+
+  read_until(socket, BITTORRENT_MESSAGE_ID_HASH['bitfield'])
+  extension_handshake_message = encode_bencode({ 'm' => { 'ut_metadata' => 129 } })
+  [BITTORRENT_MESSAGE_ID_HASH['extension']].pack('C') + extension_handshake_message
+end
+
 command = ARGV[0]
 
 case command
@@ -472,8 +483,8 @@ when 'handshake'
   decoded_str = parse_torrent_file(torrent_path)
   info_hash = encode_and_digest_info_hash(decoded_str)
 
-  hex_peer_id, = peer_handshake(peer_ip, peer_port, info_hash)
-  puts "Peer ID: #{hex_peer_id}"
+  handshake_payload, = peer_handshake(peer_ip, peer_port, info_hash)
+  puts "Peer ID: #{handshake_payload[48..].unpack1('H*')}"
 when 'download_piece'
   if ARGV.length < 5
     puts 'Usage: your_program.sh download_piece -o <output_file> <torrent_file> <piece_index>'
@@ -536,6 +547,8 @@ when 'magnet_handshake'
   peers_data = discover_peers(peers)
   peer_ip, peer_port = peers_data.first.split(':', 2)
 
-  hex_peer_id, = peer_handshake(peer_ip, peer_port, info_hash, extension: true)
-  puts "Peer ID: #{hex_peer_id}"
+  handshake_payload, socket, = peer_handshake(peer_ip, peer_port, info_hash, extension: true)
+  extension_payload = build_extension_handshake_payload(socket, handshake_payload)
+  send_peer_message(socket, 20, payload: extension_payload)
+  puts "Peer ID: #{handshake_payload[48..].unpack1('H*')}"
 end
