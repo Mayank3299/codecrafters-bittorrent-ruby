@@ -299,9 +299,9 @@ def validate_piece_data(info_hash, piece_index, piece_data)
   true
 end
 
-def handle_peer_messages(socket, info_hash, output_path, piece_index)
+def handle_peer_messages(socket, info_hash, output_path, piece_index, bitfield_required: true)
   # Waiting to receive bitfield message
-  read_until(socket, BITTORRENT_MESSAGE_ID_HASH['bitfield'])
+  read_until(socket, BITTORRENT_MESSAGE_ID_HASH['bitfield']) if bitfield_required
   make_peer_unchoked(socket)
   # Download piece in blocks
   piece_data = piece_download(socket, info_hash, piece_index)
@@ -588,4 +588,34 @@ when 'magnet_info'
   puts "Piece Length: #{magnet_data['piece length']}"
   puts "Piece Length: #{magnet_data['piece length']}"
   puts "Piece Hashes: #{magnet_data['pieces'].unpack1('H*').scan(/.{40}/)}"
+when 'magnet_download_piece'
+  if ARGV.length < 5
+    puts 'Usage: your_program.sh magnet_download_piece -o <output_file> <magnet_link> <piece_index>'
+    exit(1)
+  end
+  output_file = ARGV[2]
+  magnet_link = ARGV[3]
+  piece_index = ARGV[4].to_i
+
+  magnet_hash = Hash[URI.decode_www_form(magnet_link)]
+
+  tracker_url = magnet_hash['tr']
+  info_hash = [magnet_hash['magnet:?xt'].split('urn:btih:').last].pack('H*')
+  peers = peer_string(nil, tracker_url: tracker_url, info_hash: info_hash)
+  peers_data = discover_peers(peers)
+  peer_ip, peer_port = peers_data.first.split(':', 2)
+
+  handshake_payload, socket, = peer_handshake(peer_ip, peer_port, info_hash, extension: true)
+  extension_payload = build_extension_handshake_payload(socket, handshake_payload)
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_payload)
+  message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'])
+
+  peer_metadata_extension_id = decode_bencode(message[:payload][1..]).first['m']['ut_metadata']
+  extension_message = build_request_metadata_payload(peer_metadata_extension_id)
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_message)
+  metadata_message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'])
+  data = metadata_message[:payload]
+  idx = data.index('eed')
+  magnet_data = decode_bencode(data[idx + 2..]).first
+  handle_peer_messages(socket, magnet_data, output_file, piece_index, bitfield_required: false)
 end
