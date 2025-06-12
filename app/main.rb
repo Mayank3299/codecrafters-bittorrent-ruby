@@ -590,7 +590,7 @@ when 'magnet_info'
   puts "Piece Hashes: #{magnet_data['pieces'].unpack1('H*').scan(/.{40}/)}"
 when 'magnet_download_piece'
   if ARGV.length < 5
-    puts 'Usage: your_program.sh magnet_download_piece -o <output_file> <magnet_link> <piece_index>'
+    puts 'Usage: your_program.sh magnet_download_piece -o <output_file> <magnet-link> <piece_index>'
     exit(1)
   end
   output_file = ARGV[2]
@@ -618,4 +618,39 @@ when 'magnet_download_piece'
   idx = data.index('eed')
   magnet_data = decode_bencode(data[idx + 2..]).first
   handle_peer_messages(socket, magnet_data, output_file, piece_index, bitfield_required: false)
+when 'magnet_download'
+  if ARGV.length < 4
+    puts 'Usage: your_program.sh magnet_download -o <output_file> <magnet-link>'
+    exit(1)
+  end
+
+  output_path = ARGV[2]
+  magnet_link = ARGV[3]
+
+  magnet_hash = Hash[URI.decode_www_form(magnet_link)]
+  tracker_url = magnet_hash['tr']
+  info_hash = [magnet_hash['magnet:?xt'].split('urn:btih:').last].pack('H*')
+
+  peers = peer_string(nil, tracker_url: tracker_url, info_hash: info_hash)
+  peers_data = discover_peers(peers)
+  peer_ip, peer_port = peers_data.pop.split(':', 2)
+
+  handshake_payload, socket, = peer_handshake(peer_ip, peer_port, info_hash, extension: true)
+  extension_payload = build_extension_handshake_payload(socket, handshake_payload)
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_payload)
+  message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'])
+
+  peer_metadata_extension_id = decode_bencode(message[:payload][1..]).first['m']['ut_metadata']
+  extension_message = build_request_metadata_payload(peer_metadata_extension_id)
+  send_peer_message(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'], payload: extension_message)
+  metadata_message = read_until(socket, BITTORRENT_MESSAGE_ID_HASH['extension_message'])
+  data = metadata_message[:payload]
+  idx = data.index('eed')
+  decoded_info = decode_bencode(data[idx + 2..]).first
+  total_pieces = calculate_total_pieces(decoded_info)
+
+  peers_queue = initialize_peers_queue(peers_data)
+  prepare_output_file(output_path, decoded_info['length'])
+
+  start_download(peers_queue, decoded_info, total_pieces, info_hash, output_path)
 end
